@@ -1,0 +1,3514 @@
+---
+title: "Script Article Rouget"
+author: "CS"
+date: "2024-08-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	fig.align = "center",
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+# Introduction
+
+Data on the stereological readings of the the red-mullet (Mullus surmuletus), as well as the macroscopic parameters of each sampled individual.
+
+Script is seperated into different parts following the article. Datasets used here are **Stereo_MULL** and **Macro_MULL** from the Zenodo repositories (https://zenodo.org/records/8060356 and https://zenodo.org/records/8060309)
+
+I. Inter-agent calibration (l.73-77): *ASK FOR Script_dif_3_agents.Rmd!* three to four agents read the same 15 histological slides. The goal of this exercise was to show the differences between readings from different operators (percentage agreement) with different degrees of knowledge on histological ovarian structures.
+
+II. Cellular homogeneity check: both ovaries of 15 fish were sectioned in the anterior, posterior and median positions. Cellular counts were analysed and compared for two stocks : Bay of Biscay (l.1282-2438) and English Channel (l.78-1281).
+
+III. Stereology results : using the stereological reading results to classify individuals into a maturity phase. Comparing the stereology results with the visual method results (Confusion matrix : l.2659-2668). Analysis of L50, A50, cellular structures in time for both stocks : Bay of Biscay (l.2669-2757) and English Channel (l.2758-2844)
+
+IV. Hierarchical clustering (l.2846-3098): identify potential future spawners, form a new group and re-establish a L50, A50, GSI and review the cellular structure distributions
+
+
+```{r message=FALSE, warning=FALSE}
+
+library(BiocManager)
+library(RBioFormats)
+library(rJava)
+library(EBImage)
+library(xml2)
+library(magick)
+library(RColorBrewer)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(irr)
+library(rpart)
+library(ade4)
+library(factoextra)
+library(tidyr)
+library(forcats)
+library(readxl)
+library(gt)
+library(export)
+library(ggrepel)
+library(stringr)
+library(sizeMat)
+
+```
+
+```{r data1}
+
+setwd('C:/Users/csauger/Documents/These/Documents_et_Protocoles/Rouget/Article Rouget Barbet')
+
+#Dataset with biological parameters (**Macro_MULL**) from Bay of Biscay
+Macro_BB <- read_excel("../Article Rouget Barbet/Macro_MULL_BB.xlsx")
+Macro_BB$Total_fish_length <- as.numeric(Macro_BB$Total_fish_length)
+
+#Dataset with biological parameters (**Macro_MULL**) from English Channel
+Macro_EC <- read_excel("../Article Rouget Barbet/Macro_MULL_EC.xlsx")
+
+#Dataset with Stereology readings (**Stereo_MULL**) from Bay of Biscay
+Stereo_BB <- read.csv("../Article Rouget Barbet/Stereo_MULL_BB.csv", header = TRUE, sep = ';', as.is = T)
+
+#Dataset with Stereology readings (**Stereo_MULL**) from English Channel
+Stereo_EC <- read.csv("../Article Rouget Barbet/Stereo_MULL_EC.csv", header = TRUE, sep = ';', as.is = T)
+
+```
+
+# I. Inter-agent calibration
+
+All analysys and results are in the R Script : Script_dif_3_agents.Rmd
+They use the data from the *Calibration* dataset folder found in either Zenodo repositories (https://zenodo.org/records/8060356 or https://zenodo.org/records/8060309)
+
+# II. Cellular homogeneity check: English Channel
+
+We set up the reading data into a more organized dataframe for further analysis
+
+```{r data2, results='hide',message=FALSE}
+
+Stereo_EC <- Stereo_EC %>% mutate(Fish_ID=((substr(slideid,1,12))))
+
+Stereo_EC1 <- Stereo_EC %>% filter(reading == 'Homogénéité') %>% group_by(typecell, slideid) %>% summarise(hit_points= n())
+Stereo_EC2 <- Stereo_EC1 %>% spread(key = "typecell", value = hit_points)
+Stereo_EC2[is.na(Stereo_EC2)] <- 0
+
+# Computation of each cellular type count (%)
+Stereo_EC3 <- (Stereo_EC2[,2:13]*100)/(rowSums(Stereo_EC2[,2:13]))
+Stereo_EC3 <- cbind(Stereo_EC3, Stereo_EC2$slideid)%>% rename(slideid = `Stereo_EC2$slideid`)
+Stereo_EC4 <- Stereo_EC3 %>% pivot_longer(cols=1:12, names_to = "typecell", values_to = "vol_fract_estim")
+
+```
+
+## MULL_SUR_154 
+
+```{r data3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_1 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_154"))
+
+# Ventral gonad
+intra_id_EC_EC_1_G <- intra_id_EC_1 %>% filter(stringr::str_detect(slideid, "MULL_SUR_154"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_EC_1_D <- intra_id_EC_1 %>% filter(stringr::str_detect(slideid, "MULL_SUR_154"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 1 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot1, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_1, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog1, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_1 <- intra_id_EC_1 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_1 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_155 
+
+```{r data4, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_2 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_155"))
+
+# Ventral gonad
+intra_id_EC_2_G <- intra_id_EC_2 %>% filter(stringr::str_detect(slideid, "MULL_SUR_155"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_2_D <- intra_id_EC_2 %>% filter(stringr::str_detect(slideid, "MULL_SUR_155"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 2 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot2, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_2, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog2, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_2 <- intra_id_EC_2 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_2 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_156 
+
+```{r data5, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_3 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_156"))
+
+# Ventral gonad
+intra_id_EC_3_G <- intra_id_EC_3 %>% filter(stringr::str_detect(slideid, "MULL_SUR_156"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_3_D <- intra_id_EC_3 %>% filter(stringr::str_detect(slideid, "MULL_SUR_156"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 3 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot3, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_3, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog3, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_3 <- intra_id_EC_3 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_3 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_157 
+
+```{r data6, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_4 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_157"))
+
+# Ventral gonad
+intra_id_EC_4_G <- intra_id_EC_4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_157"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_4_D <- intra_id_EC_4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_157"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 4 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot4, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_4, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog4, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_4 <- intra_id_EC_4 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_4 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_180 
+
+```{r data7, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_6 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_180"))
+
+# Ventral gonad
+intra_id_EC_6_G <- intra_id_EC_6 %>% filter(stringr::str_detect(slideid, "MULL_SUR_180"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_6_D <- intra_id_EC_6 %>% filter(stringr::str_detect(slideid, "MULL_SUR_180"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 5 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot5, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_6, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog6, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_6 <- intra_id_EC_6 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_6 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_159 
+
+```{r data8, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_7 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_159"))
+
+# Ventral gonad
+intra_id_EC_7_G <- intra_id_EC_7 %>% filter(stringr::str_detect(slideid, "MULL_SUR_159"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_7_D <- intra_id_EC_7 %>% filter(stringr::str_detect(slideid, "MULL_SUR_159"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 6 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot6, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_7, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog7, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_7 <- intra_id_EC_7 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_7 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_160 
+
+```{r data9, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_8 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_160"))
+
+# Ventral gonad
+intra_id_EC_8_G <- intra_id_EC_8 %>% filter(stringr::str_detect(slideid, "MULL_SUR_160"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_8_D <- intra_id_EC_8 %>% filter(stringr::str_detect(slideid, "MULL_SUR_160"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 7 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot7, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_8, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog8, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_8 <- intra_id_EC_8 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_8 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_161 
+
+```{r data10, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_9 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_161"))
+
+# Ventral gonad
+intra_id_EC_9_G <- intra_id_EC_9 %>% filter(stringr::str_detect(slideid, "MULL_SUR_161"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_9_D <- intra_id_EC_9 %>% filter(stringr::str_detect(slideid, "MULL_SUR_161"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 8 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot8, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_9, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog9, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_9 <- intra_id_EC_9 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_9 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_162 
+
+```{r data11, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_10 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_162"))
+
+# Ventral gonad
+intra_id_EC_10_G <- intra_id_EC_10 %>% filter(stringr::str_detect(slideid, "MULL_SUR_162"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_10_D <- intra_id_EC_10 %>% filter(stringr::str_detect(slideid, "MULL_SUR_162"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 9 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot9, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_10, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog10, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_10 <- intra_id_EC_10 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_10 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_163 
+
+```{r data12, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_11 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_163"))
+
+# Ventral gonad
+intra_id_EC_11_G <- intra_id_EC_11 %>% filter(stringr::str_detect(slideid, "MULL_SUR_163"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_11_D <- intra_id_EC_11 %>% filter(stringr::str_detect(slideid, "MULL_SUR_163"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 10 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot10, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_11, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog11, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_11 <- intra_id_EC_11 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_11 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_164 
+
+```{r data13, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_12 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_164"))
+
+# Ventral gonad
+intra_id_EC_12_G <- intra_id_EC_12 %>% filter(stringr::str_detect(slideid, "MULL_SUR_164"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_12_D <- intra_id_EC_12 %>% filter(stringr::str_detect(slideid, "MULL_SUR_164"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 11 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot11, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_12, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog12, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_12 <- intra_id_EC_12 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_12 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_165 
+
+```{r data14, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_13 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_165"))
+
+# Ventral gonad
+intra_id_EC_13_G <- intra_id_EC_13 %>% filter(stringr::str_detect(slideid, "MULL_SUR_165"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_13_D <- intra_id_EC_13 %>% filter(stringr::str_detect(slideid, "MULL_SUR_165"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 12 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot12, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_13, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog13, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_13 <- intra_id_EC_13 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_13 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_167 
+
+```{r data15, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_14 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_167"))
+
+# Ventral gonad
+intra_id_EC_14_G <- intra_id_EC_14 %>% filter(stringr::str_detect(slideid, "MULL_SUR_167"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_14_D <- intra_id_EC_14 %>% filter(stringr::str_detect(slideid, "MULL_SUR_167"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 13 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot13, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_14, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog14, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_14 <- intra_id_EC_14 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_14 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_168 
+
+```{r data16, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_15 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_168"))
+
+# Ventral gonad
+intra_id_EC_15_G <- intra_id_EC_15 %>% filter(stringr::str_detect(slideid, "MULL_SUR_168"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_15_D <- intra_id_EC_15 %>% filter(stringr::str_detect(slideid, "MULL_SUR_168"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 14 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot14, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_15, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog15, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_15 <- intra_id_EC_15 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_15 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_169 
+
+```{r data17, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_16 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_169"))
+
+# Ventral gonad
+intra_id_EC_16_G <- intra_id_EC_16 %>% filter(stringr::str_detect(slideid, "MULL_SUR_169"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_16_D <- intra_id_EC_16 %>% filter(stringr::str_detect(slideid, "MULL_SUR_169"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 15 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot15, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_16, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog16, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_16 <- intra_id_EC_16 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_16 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_175 
+
+```{r data18, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_EC_17 <- Stereo_EC4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_175"))
+
+# Ventral gonad
+intra_id_EC_17_G <- intra_id_EC_17 %>% filter(stringr::str_detect(slideid, "MULL_SUR_175"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_EC_17_D <- intra_id_EC_17 %>% filter(stringr::str_detect(slideid, "MULL_SUR_175"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 16 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot16, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_EC_17, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog17, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_EC_17 <- intra_id_EC_17 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_EC_17 %>% filter(diffperc > 3)
+
+```
+
+Setting up the data for a GLM and an ACP.
+
+The dataframe contains : the reference ID of each individuals (**Fish_ID**), the histological slide's full name (**slideid**), each cellular type studied in this GLM (**typecell**), the position of the cross section (**position** = **D1**, **D2**, **D3**, **G1**, **G2** or **G3**), the number of times each structure was counted (**hit_points**), and the total number of sampling points for each slide (**nbrtot**).
+
+```{r data19, echo=TRUE, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+Stereo_EC5 <- Stereo_EC1 %>% spread(key = "slideid", value = hit_points) 
+Stereo_EC6 <- Stereo_EC5 %>% pivot_longer(cols=2:97, names_to = "slideid", values_to = "hit_points")
+Stereo_EC6[is.na(Stereo_EC6)] <- 0
+Stereo_EC7 <- Stereo_EC6 %>% mutate(position=((substr(slideid,14,15))))
+Stereo_EC9 <- Stereo_EC7 %>% mutate(Fish_ID=((substr(slideid,1,12))))
+
+Stereo_EC8 <- Stereo_EC %>% filter(reading == 'Homogénéité') %>% mutate(position=((substr(slideid,14,15))))
+
+```
+
+## GLM
+
+To test whether there is a difference, or not, between  the 6 sections for one individual, we'll be using a General Linear Model (GLM). The response variable will be the number of times a structure was counted on each slide / the total number of structures counted per slide. This variable will be in percentage, so a binomial GLM will be used.
+
+### og
+
+```{r og1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "og"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r og2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r og3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r og4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### po1
+
+```{r po11, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "po1"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r po12, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r po13, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r po14, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### po2
+
+```{r po21, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "po2"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r po22, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r po23, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r po24, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### ldo
+
+```{r ldo1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "ldo"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r ldo2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r ldo3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r ldo4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### aoA
+
+```{r aoA1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "aoA"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r aoA2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r aoA3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r aoA4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### bv
+
+```{r bv1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "bv"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r bv2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r bv3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r bv4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### ct
+
+```{r ct1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "ct"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r ct2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r ct3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r ct4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### E
+
+```{r E1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "E"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r E2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r E3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r E4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### gw
+
+```{r gw1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "gw"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r gw2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r gw3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r gw4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### Is
+
+```{r Is1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "Is"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r Is2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r Is3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r Is4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### L
+
+```{r L1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "L"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r L2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r L3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r L4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### U
+
+```{r U1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_EC9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "U"))
+
+```
+
+Adding a column that accounts for the number of times a structure was not accounted for.
+
+```{r U2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r U3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r U4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+## ACP
+
+There doesn't seem to be differences between the 96 slides. 98.5% of the variation can be explained on 2 axis.
+
+```{r acp1, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+acpmull<-Stereo_EC8%>%group_by(slideid,position,typecell)%>%summarise(n=n())%>%group_by(slideid,position)%>%mutate(tot=sum(n))%>%ungroup()%>%mutate(nperc=n/tot)
+
+datacp<-acpmull%>%transmute(slideid,position,typecell,n=nperc)%>%tidyr::spread(typecell,n,fill=0)
+dudi1  <-  dudi.pca(datacp%>%select(-slideid,-position),  scale  =  F, center  =F, scan  =  FALSE,  nf  =  6)
+
+```
+
+```{r acp2, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+fviz_pca_var(dudi1,labelsize=6, repel=T,col.var = "blue",arrowsize = 1) +
+  theme_bw()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13, face  = 'bold'))+
+  labs(title = "")
+
+#graph2ppt(file="ggplot_plot.pptx", width=12, height=6)
+
+```
+
+ACP positions
+
+```{r acp3, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+plot(dudi1$l1[,1:2],col=alpha(c("red","gold2","forestgreen","cyan3","blue","#FF00FFFF")[as.numeric(as.factor(datacp$position))],0.6), pch = 16, cex = 2, cex.lab = 1.5, cex.axis = 1.5, xlab="", ylab= "", theme=theme_bw())
+s.class(dudi1$l1,fac=as.factor(datacp$position),add.plot=T,col=c("red","gold2","forestgreen","cyan3","blue","#FF00FFFF"),clabel = 2)
+
+#graph2ppt(file="ggplot_plot.pptx", width=12, height=6)
+
+```
+
+# II. Cellular homogeneity check: Bay of Biscay
+
+We set up the reading data into a more organized dataframe for further analysis
+
+```{r data20, message=FALSE, warning=FALSE, results='hide'}
+
+Stereo_BB <- Stereo_BB %>% mutate(Fish_ID=((substr(slideid,1,12))))
+
+Stereo_BB1 <- Stereo_BB %>% filter(reading == 'Homogénéité') %>% group_by(typecell, slideid) %>% summarise(hit_points= n())
+Stereo_BB2 <- Stereo_BB1 %>% spread(key = "typecell", value = hit_points)
+Stereo_BB2[is.na(Stereo_BB2)] <- 0
+
+# Computation of each cellular type count (%)
+Stereo_BB3 <- (Stereo_BB2[,2:14]*100)/(rowSums(Stereo_BB2[,2:14]))
+Stereo_BB3 <- cbind(Stereo_BB3, Stereo_BB2$slideid)%>% rename(slideid = `Stereo_BB2$slideid`)
+Stereo_BB4 <- Stereo_BB3 %>% pivot_longer(cols=1:13, names_to = "typecell", values_to = "vol_fract_estim")
+
+```
+
+## MULL_SUR_290 
+
+```{r data21, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_5 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_290"))
+
+# Ventral gonad
+intra_id_BB_5_G <- intra_id_BB_5 %>% filter(stringr::str_detect(slideid, "MULL_SUR_290"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_5_D <- intra_id_BB_5 %>% filter(stringr::str_detect(slideid, "MULL_SUR_290"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 17 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot17, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_5, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog5, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_5 <- intra_id_BB_5 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_5 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_291 
+
+```{r data22, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_18 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_291"))
+
+# Ventral gonad
+intra_id_BB_18_G <- intra_id_BB_18 %>% filter(stringr::str_detect(slideid, "MULL_SUR_291"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_18_D <- intra_id_BB_18 %>% filter(stringr::str_detect(slideid, "MULL_SUR_291"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 18 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot18, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_18, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog18, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_18 <- intra_id_BB_18 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_18 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_292 
+
+```{r data23, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_19 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_292"))
+
+# Ventral gonad
+intra_id_BB_19_G <- intra_id_BB_19 %>% filter(stringr::str_detect(slideid, "MULL_SUR_292"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_19_D <- intra_id_BB_19 %>% filter(stringr::str_detect(slideid, "MULL_SUR_292"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 19 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot19, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_19, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog19, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_19 <- intra_id_BB_19 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_19 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_293 
+
+```{r data24, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_20 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_293"))
+
+# Ventral gonad
+intra_id_BB_20_G <- intra_id_BB_20 %>% filter(stringr::str_detect(slideid, "MULL_SUR_293"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_20_D <- intra_id_BB_20 %>% filter(stringr::str_detect(slideid, "MULL_SUR_293"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 20 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot20, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_20, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog20, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_20 <- intra_id_BB_20 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_20 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_294 
+
+```{r data25, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_21 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_294"))
+
+# Ventral gonad
+intra_id_BB_21_G <- intra_id_BB_21 %>% filter(stringr::str_detect(slideid, "MULL_SUR_294"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_21_D <- intra_id_BB_21 %>% filter(stringr::str_detect(slideid, "MULL_SUR_294"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 21 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot21, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_21, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog21, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_21 <- intra_id_BB_21 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_21 %>% filter(diffperc > 3)
+
+```
+## MULL_SUR_295 
+
+```{r data26, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_22 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_295"))
+
+# Ventral gonad
+intra_id_BB_22_G <- intra_id_BB_22 %>% filter(stringr::str_detect(slideid, "MULL_SUR_295"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_22_D <- intra_id_BB_22 %>% filter(stringr::str_detect(slideid, "MULL_SUR_295"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 22 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot22, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_22, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog22, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_22 <- intra_id_BB_22 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_22 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_296 
+
+```{r data27, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_23 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_296"))
+
+# Ventral gonad
+intra_id_BB_23_G <- intra_id_BB_23 %>% filter(stringr::str_detect(slideid, "MULL_SUR_296"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_23_D <- intra_id_BB_23 %>% filter(stringr::str_detect(slideid, "MULL_SUR_296"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot23 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot23, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_23, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog23, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_23 <- intra_id_BB_23 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_23 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_297 
+
+```{r data28, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_24 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_297"))
+
+# Ventral gonad
+intra_id_BB_24_G <- intra_id_BB_24 %>% filter(stringr::str_detect(slideid, "MULL_SUR_297"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_24_D <- intra_id_BB_24 %>% filter(stringr::str_detect(slideid, "MULL_SUR_297"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 24 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot24, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_24, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog24, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_24 <- intra_id_BB_24 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_24 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_298 
+
+```{r data29, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_25 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_298"))
+
+# Ventral gonad
+intra_id_BB_25_G <- intra_id_BB_25 %>% filter(stringr::str_detect(slideid, "MULL_SUR_298"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_25_D <- intra_id_BB_25 %>% filter(stringr::str_detect(slideid, "MULL_SUR_298"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 25 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot25, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_25, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog25, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_25 <- intra_id_BB_25 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_25 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_300 
+
+```{r data30, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_26 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_300"))
+
+# Ventral gonad
+intra_id_BB_26_G <- intra_id_BB_26 %>% filter(stringr::str_detect(slideid, "MULL_SUR_300"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_26_D <- intra_id_BB_26 %>% filter(stringr::str_detect(slideid, "MULL_SUR_300"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 26 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot26, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_26, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog26, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_26 <- intra_id_BB_26 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_26 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_301 
+
+```{r data31, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_27 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_301"))
+
+# Ventral gonad
+intra_id_BB_27_G <- intra_id_BB_27 %>% filter(stringr::str_detect(slideid, "MULL_SUR_301"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_27_D <- intra_id_BB_27 %>% filter(stringr::str_detect(slideid, "MULL_SUR_301"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 27 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot27, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_27, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog27, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_27 <- intra_id_BB_27 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_27 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_302 
+
+```{r data32, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_28 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_302"))
+
+# Ventral gonad
+intra_id_BB_28_G <- intra_id_BB_28 %>% filter(stringr::str_detect(slideid, "MULL_SUR_302"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_28_D <- intra_id_BB_28 %>% filter(stringr::str_detect(slideid, "MULL_SUR_302"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 28 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot28, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_28, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog28, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_28 <- intra_id_BB_28 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_28 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_303 
+
+```{r data33, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_29 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_303"))
+
+# Ventral gonad
+intra_id_BB_29_G <- intra_id_BB_29 %>% filter(stringr::str_detect(slideid, "MULL_SUR_303"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_29_D <- intra_id_BB_29 %>% filter(stringr::str_detect(slideid, "MULL_SUR_303"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 29 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot29, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_29, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog29, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_29 <- intra_id_BB_29 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_29 %>% filter(diffperc > 3)
+
+```
+
+## MULL_SUR_304 
+
+```{r data34, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+intra_id_BB_30 <- Stereo_BB4 %>% filter(stringr::str_detect(slideid, "MULL_SUR_304"))
+
+# Ventral gonad
+intra_id_BB_30_G <- intra_id_BB_30 %>% filter(stringr::str_detect(slideid, "MULL_SUR_304"))%>%filter(stringr::str_detect(slideid, "G"))
+
+# Dorsal gonad
+intra_id_BB_30_D <- intra_id_BB_30 %>% filter(stringr::str_detect(slideid, "MULL_SUR_304"))%>%filter(stringr::str_detect(slideid, "D"))
+
+```
+
+### Plot 30 : Surface (%) of different structures for 6 sections of a single fish
+
+```{r plot30, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+ggplot(data = intra_id_BB_30, aes(x=typecell, y=vol_fract_estim, fill=slideid)) +
+  geom_bar(stat = "identity",  position=position_dodge()) +
+  xlab("Structures") +
+  facet_wrap(~slideid) +
+  ylab("Surface (%)") +
+  theme(axis.text.x = element_text(size=6))
+
+```
+
+We compute the readings to see the surface (%) difference between the 6 sections
+
+```{r homog30, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+intradiff_id_BB_30 <- intra_id_BB_30 %>% group_by(typecell)%>%
+  summarise(minsurf= min(vol_fract_estim,na.rm=T),
+            maxsurf= max(vol_fract_estim,na.rm=T),
+            diffperc=maxsurf-minsurf,
+            sdperc=sd(vol_fract_estim,na.rm=T),
+            meanperc=mean(vol_fract_estim,na.rm=T))
+
+intradiff_id_BB_30 %>% filter(diffperc > 3)
+
+```
+
+
+Setting up the data for a GLM and an ACP.
+
+The dataframe contains : the reference ID of each individuals (**Fish_ID**), the histological slide's full name (**slideid**), each cellular type studied in this GLM (**typecell**), the position of the cross section (**position** = **D1**, **D2**, **D3**, **G1**, **G2** or **G3**), the number of times each structure was counted (**hit_points**), and the total number of sampling points for each slide (**nbrtot**).
+
+```{r data35, echo=TRUE, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+Stereo_BB5 <- Stereo_BB1 %>% spread(key = "slideid", value = hit_points) 
+Stereo_BB6 <- Stereo_BB5 %>% pivot_longer(cols=2:85, names_to = "slideid", values_to = "hit_points")
+Stereo_BB6[is.na(Stereo_BB6)] <- 0
+Stereo_BB7 <- Stereo_BB6 %>% mutate(position=((substr(slideid,14,15))))
+Stereo_BB9 <- Stereo_BB7 %>% mutate(Fish_ID=((substr(slideid,1,12))))
+
+Stereo_BB8 <- Stereo_BB %>% filter(reading == 'Homogénéité') %>% mutate(position=((substr(slideid,14,15))))
+
+```
+
+## GLM
+
+To test whether there is a difference, or not, between  the 6 sections for one individual, we'll be using a General Linear Model (GLM). The response variable will be the number of times a structure was counted on each slide / the total number of structures counted per slide. This variable will be in percentage, so a binomial GLM will be used.
+
+### og
+
+```{r BBog1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "og"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBog2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBog3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBog4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### po1
+
+```{r BBpo11, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "po1"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBpo12, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBpo13, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBpo14, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### po2
+
+```{r BBpo21, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "po2"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBpo22, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBpo23, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBpo24, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### ldo
+
+```{r BBldo1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "ldo"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBldo2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBldo3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBldo4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### cao
+
+```{r BBcao1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "cao"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBcao2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBcao3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBcao4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### aoA
+
+```{r BBaoA1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "aoA"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBaoA2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBaoA3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBaoA4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### bv
+
+```{r BBbv1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "bv"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBbv2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBbv3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBbv4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### ct
+
+```{r BBct1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "ct"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBct2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBct3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBct4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### E
+
+```{r BBE1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "E"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBE2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBE3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBE4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### gw
+
+```{r BBgw1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "gw"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBgw2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBgw3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBgw4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### Is
+
+```{r BBIs1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "Is"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBIs2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBIs3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBIs4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### L
+
+```{r BBL1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "L"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBL2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBL3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBL4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+### U
+
+```{r BBU1, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm <- Stereo_BB9 %>% mutate(position=substr(slideid,nchar(slideid)-1,nchar(slideid)-0)) %>% 
+  group_by(slideid)%>% 
+  mutate(nbtot=sum(hit_points))%>%
+  ungroup()%>%
+  filter(stringr::str_detect(typecell, "U"))
+
+```
+
+Adding a collumn that accounts for the number of times a structure was not accounted for.
+
+```{r BBU2, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+dat.glm$cas_neg <-dat.glm$nbtot - dat.glm$hit_points
+
+```
+
+GLM model with **logit** link
+
+```{r BBU3, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+glmcap <- glm(cbind(hit_points, cas_neg) ~ Fish_ID + position , family=binomial(link="logit"), data = dat.glm)
+
+summary(glmcap)
+
+```
+
+A **drop1** is used to summarize the individual deviances of our variables on our model
+
+```{r BBU4, echo=TRUE}
+
+drop1(glmcap, test="Chi")
+
+```
+
+## ACP
+
+There doesn't seem to be differences between the 96 slides. 98.5% of the variation can be explained on 2 axis.
+
+```{r acp4, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+acpmull<-Stereo_BB8%>%group_by(slideid,position,typecell)%>%summarise(n=n())%>%group_by(slideid,position)%>%mutate(tot=sum(n))%>%ungroup()%>%mutate(nperc=n/tot)
+
+datacp<-acpmull%>%transmute(slideid,position,typecell,n=nperc)%>%tidyr::spread(typecell,n,fill=0)
+dudi1  <-  dudi.pca(datacp%>%select(-slideid,-position),  scale  =  F, center  =F, scan  =  FALSE,  nf  =  6)
+
+```
+
+```{r acp5, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+fviz_pca_var(dudi1,labelsize=6, repel=T,col.var = "blue",arrowsize = 1) +
+  theme_bw()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13, face  = 'bold'))+
+  labs(title = "")
+
+#graph2ppt(file="ggplot_plot.pptx", width=12, height=6)
+
+```
+
+ACP positions
+
+```{r acp6, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+plot(dudi1$l1[,1:2],col=alpha(c("red","gold2","forestgreen","cyan3","blue","#FF00FFFF")[as.numeric(as.factor(datacp$position))],0.6), pch = 16, cex = 2, cex.lab = 1.5, cex.axis = 1.5, xlab="", ylab= "", theme=theme_bw())
+s.class(dudi1$l1,fac=as.factor(datacp$position),add.plot=T,col=c("red","gold2","forestgreen","cyan3","blue","#FF00FFFF"),clabel = 2)
+
+#graph2ppt(file="ggplot_plot.pptx", width=12, height=6)
+
+```
+
+# III. Stereology results
+
+We concatenate the "Total" reading data from Bay of Biscay and English Channel, as well as concatenate both histological (Stereo_MULL) and macroscopic (MACRO_MULL) data into a single dataframe.
+
+```{r data36}
+
+Stereo_MULL <- bind_rows(Stereo_BB, Stereo_EC) %>% filter(reading == "Total")
+Macro_MULL <- bind_rows(Macro_BB, Macro_EC)
+
+# Setting up the date in a dd/mm/yy format
+Macro_MULL$Date <- format(as.Date(Macro_MULL$Date, format = "%Y-%m-%d"), "%d/%m/%Y")
+mullus1 <- Macro_MULL %>%mutate(Date=((substr(Date,4,10)))) %>% mutate(Fish_ID=((gsub(" ","_",Fish_ID))))
+
+stereo <- Stereo_MULL %>% group_by(typecell, slideid) %>% summarise(hit_points= n())
+stereo2 <- stereo %>% spread(key = "typecell", value = hit_points) 
+stereo2[is.na(stereo2)] <- 0
+stereo3 <- stereo2%>% mutate(Fish_ID=((substr(slideid,1,12))))
+stereoR <- select(Stereo_MULL, "slideid", "reading") %>% distinct()
+stereo3 <- left_join(stereo3,stereoR, by="slideid")
+
+# Computation of each cellular type count (%) and the aoA% compared to other follicles
+stereo4 <- (stereo3[,2:19]*100)/(rowSums(stereo3[,2:19]))
+stereo4 <- cbind(stereo4, stereo3$Fish_ID)%>% rename(Fish_ID = `stereo3$Fish_ID`)
+stereo4 <- cbind(stereo4, stereo3$reading)%>% rename(reading = `stereo3$reading`)
+stereo4 <- stereo4%>% rowwise() %>% mutate(aoA_perc=(100*aoA/(sum(og,po1,po2,ldo,cao,vtg,oih,ho,aoA, na.rm = T))))
+stereo4 <- stereo4 %>% rowwise() %>% mutate(ldo_perc=(100*ldo/(sum(og,po1,po2,ldo,cao,vtg,oih,ho,aoA, na.rm = T))))
+
+# Dataframe with Stereological counts and macroscopic parameters
+mullus2 <- left_join(stereo4, mullus1, by = c("Fish_ID" = "Fish_ID"))
+mullus3 <- mullus2 %>% 
+        rename("L_fish" = "Total_fish_length",
+               "stock" = "ICES _Division",
+               "W_fish" = "Ungutted_fish_weight",
+               "parasite" = "Parasite",
+               "mat_estim" = "Visual_maturity",
+               "age" = "Age",
+               "liver" = "Liver_weight",
+               "D_gon" = "Droite_gonad_weight",
+               "G_gon" = "Gauche_gonad_weight")
+
+# Replace the ICES stat rectangles with the Stock name
+mullus3$stock <- str_replace_all(mullus3$stock, c("7d"="English channel","7j"="Bay of Biscay","7g"="Bay of Biscay", "8b;8c" = "Bay of Biscay", "8a" = "Bay of Biscay", "8b" = "Bay of Biscay"))
+
+# We set up a dataframe with just the fish number and the quantified cellular structures for later plots
+stereo5 <- (stereo3[,c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","aoA","aoB")]*100)/(rowSums(stereo3[,c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","aoA","aoB")]))
+stereo5 <- cbind(stereo5, stereo3$Fish_ID)
+colnames(stereo5)[colnames(stereo5) == "stereo3$Fish_ID"] ="Fish_ID"
+
+# Setting up a function to summarize the mean counts of cellular structures
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- plyr::rename(data_sum, c("mean" = varname))
+ return(data_sum)
+}
+
+```
+
+List of mesured parameters :
+
+-**L_fish**: total lengh of fish (cm)      
+-**W_fish**: ungutted weight of fish (g)   
+-**parasite**: presence of parasites (Y/N)
+-**mat_estim**: visually estimated maturity phase
+-**age**: fish age (year)                     
+-**liver**: Liver weight (g)                
+-**D_gon**: Weight of right ovary (g)  
+-**G_gon**: weight of left ovary (g)
+
+Computation of the last parameters
+
+- **GSI**: ratio between the ovaries' total weight and the fish's ungutted weight (gonado-somatic index)
+- **HSI**: ratio between the liver's weight and the fish's ungutted weight (hepato-somatic index)
+
+```{r data37, echo= TRUE}
+
+# Make sure numerical data is correctly labelled as such
+mullus3$liver <- as.numeric(mullus3$liver)
+mullus3$age <- as.numeric(mullus3$age)
+mullus3$D_gon <- as.numeric(mullus3$D_gon)
+mullus3$G_gon <- as.numeric(mullus3$G_gon)
+mullus3$Fish_N <- as.character(mullus3$Fish_N) 
+
+mullus4 <- mullus3%>%select(Fish_ID, Date, stock,L_fish, W_fish, mat_estim, og,po1,po2,ldo,cao,vtg,oih,ho,POF,aoA,aoB,L,gw,ct,bv,Is,U,E, aoA_perc,ldo_perc,age, liver, D_gon,G_gon) %>% rowwise() %>% mutate(GSI=(sum(D_gon,G_gon, na.rm = T)/W_fish*100)) %>% mutate(HSI=(liver/W_fish*100))
+
+```
+
+## Manual determination of maturity phases
+
+Following the ICES and Brown-Peterson et al. (2011) definitions, the stereological counts were used to classify each individual into a maturity phase. For this process, only the phases A, B, C and E were established, with all remaining slides being automatically put into the D (Regressing/Regenerating) phase.
+
+```{r data38}
+
+MullusH<-mullus4
+MullusH$matphase<-"unknown"
+
+```
+
+### Immature - A
+
+Individuals classified into the Immature phase have the following histological criteria:
+
+- a count of **og**, **po1**, **po2** or **ldo** that is not null
+- absence of **POF**, **aoB**, **cao**, **vtg**, **oih** and **ho**
+- a count of **aoA** that is less than 50% of germinal cells counted
+
+```{r, message=FALSE, warning=FALSE}
+
+MullusH$matphase[(MullusH$og>0 | MullusH$po1>0 | MullusH$po2>0 | MullusH$ldo>0) & MullusH$POF==0 & MullusH$aoB==0 & MullusH$cao==0 & MullusH$vtg==0 & MullusH$oih==0 & MullusH$ho==0 & MullusH$aoA_perc<50]<-"A"
+
+```
+
+### Developping - B
+
+Individuals classified into the Developping phase have the following histological criteria:
+
+- presence of either **cao** or **vtg**
+- a count of **aoA** that is less than 50% of germinal cells counted
+- absence of **POF**, **aoB**,  **oih** and **ho**
+
+```{r, message=FALSE, warning=FALSE}
+
+MullusH$matphase[(MullusH$cao>0 | MullusH$vtg>0) & MullusH$POF==0 & MullusH$aoB==0 & MullusH$oih==0 & MullusH$ho==0 & MullusH$aoA_perc<50] <-"B"
+
+```
+
+### Spawning - C
+
+Individuals classified into the Spawning phase have the following histological criteria:
+
+- presence of **POF**
+- presence of either **vtg**, **oih**, **ho**,  or **aoB**
+- a count of **aoA** that is less than 50% of germinal cells counted
+
+```{r, message=FALSE, warning=FALSE}
+
+MullusH$matphase[(MullusH$vtg>0 | MullusH$oih>0 | MullusH$ho>0 | MullusH$aoB>0) & MullusH$POF>0 & MullusH$aoA_perc<50]<-"Ca"
+
+```
+
+- absence of **POF** and of **aoB**
+- presence of either **oih** or **ho**
+- a count of **aoA** that is less than 50% of germinal cells counted
+
+```{r, message=FALSE, warning=FALSE}
+
+MullusH$matphase[(MullusH$oih>0 | MullusH$ho>0) & MullusH$POF==0 & MullusH$aoA_perc<=50 & MullusH$aoA_perc<50]<-"Cb"
+
+```
+
+### Omitted Spawning - E
+
+Individuals classified into the Omitted Spawning phase have the following histological criteria:
+
+- a count of **aoA** that is more or equal to 50% of germinal cells counted
+- absence of **POF**
+
+```{r, message=FALSE, warning=FALSE}
+
+MullusH$matphase[MullusH$POF==0 & MullusH$aoA_perc>=50 ]<-"E"
+
+```
+
+### Regressing / Regenerating - D
+
+Individuals classified into the Regressing/Regenerating phase are those that have not been classified into the other phases. 
+
+```{r}
+
+mullus_D <- MullusH[grepl("unknown", MullusH$matphase),]
+mullus_D$matphase <- "D"
+
+```
+
+Combining the histologically determined maturity phases with the rest of the data.
+
+```{r message=FALSE, warning=FALSE}
+
+stadeD<-mullus_D%>%transmute(Fish_ID,matphase)
+stadeABCE<-MullusH%>%transmute(Fish_ID,matphase)%>%filter(matphase%in%c("A","B","Ca","Cb","D", "E"))
+stadeAll<-rbind(stadeD,stadeABCE)
+
+macroHname<-c("mat_estim","Vis_Stereo_CS","Date","stock","reading","og","po1","po2","ldo","cao","vtg","oih","ho","POF","L","aoA","aoB","gw","ct","bv","Is","E","U","aoA_perc","ldo_perc","Fish_ID","L_fish","W_fish","age", "parasite","liver","D_gon","G_gon","GSI","HSI")
+tabmacro <-full_join(stadeAll,mullus4[,names(mullus4)%in%macroHname])
+
+```
+
+plot 31 : Maturity phase (%) of individuals per month
+
+```{r plot31}
+
+tabmacro$Date <- factor(tabmacro$Date, levels = c("11/2020","02/2021","03/2021","04/2021","05/2021","06/2021","07/2021","08/2021","09/2021","10/2021","11/2021","12/2021","01/2022","02/2022","08/2022"))
+
+ggplot(tabmacro,aes(x=Date,y=L_fish, color = matphase, groupe=stock))+
+  geom_point(aes(shape=stock),width = 0.2, height = 0.2, position=position_dodge(width=0.6), size=2)+ 
+  theme_bw()+
+   scale_color_manual(name = "Maturity phase", values=c('#FF0000FF', 'orange', 'springgreen3', 'green4', '#0092FFFF', '#4900FFFF', 'black'))+
+  scale_shape_manual(name = "Stock", values=c(24, 3))+
+  scale_y_continuous(breaks=c(10,15,20,25,30,35))+
+  labs(x = "", y = "Length (cm)") +
+  theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust = 1, size = 11), 
+        axis.text.y = element_text(size = 11),
+        axis.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=11),
+        legend.title=element_text(size=12))
+
+#graph2ppt(file="ggplot_plot.pptx", width=7, height=5)
+
+```
+
+## Confusion matrix
+
+Table 1 : Table crossing the number of individuals classified visually with those same individuals classified with the stereological method
+
+```{r table1}
+
+table(tabmacro$matphase,tabmacro$mat_estim) 
+
+```
+
+## Maturity ogive, L50 and A50 : Bay of Biscay
+
+```{r data39, message=FALSE, warning=FALSE}
+
+dat_ogiveBB <- tabmacro %>% filter(stock == "Bay of Biscay")
+dat_ogiveBB$L_fish<-as.numeric(as.character(dat_ogiveBB$L_fish))
+
+dat_ogiveBB <-dat_ogiveBB[!grepl("E", dat_ogiveBB$matphase),]
+dat_ogiveBB <-dat_ogiveBB[!grepl("F", dat_ogiveBB$mat_estim),]
+
+```
+
+plot 32 : Maturity ogive and L50 determined with visually estimated maturity
+
+```{r plot32}
+
+gonad_mat1<-gonad_mature(dat_ogiveBB,varNames=c("L_fish","mat_estim"),inmName=c("A"),
+			matName=c("B","C","D"),method="fq",niter=800)
+print(gonad_mat1)
+plot(gonad_mat1)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 33 : Maturity ogive and A50 determined with visually estimated maturity
+
+```{r plot33}
+
+gonad_mat2<-gonad_mature(dat_ogiveBB,varNames=c("age","mat_estim"),inmName=c("A"),
+			matName=c("B","C","D"),method="fq",niter=800)
+print(gonad_mat2)
+plot(gonad_mat2)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 34 : Maturity ogive and L50 determined with stereologically estimated maturity
+
+```{r plot34}
+
+gonad_mat3<-gonad_mature(dat_ogiveBB,varNames=c("L_fish","matphase"),inmName=c("A"),
+			matName=c("B","Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat3)
+plot(gonad_mat3)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 35 : Maturity ogive and A50 determined with stereologically estimated maturity
+
+```{r plot35}
+
+gonad_mat4<-gonad_mature(dat_ogiveBB,varNames=c("age","matphase"),inmName=c("A"),
+			matName=c("B","Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat4)
+plot(gonad_mat4)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+```{r data40, message=FALSE, warning=FALSE}
+
+tabhistoBB <- tabmacro %>% filter(stock == "Bay of Biscay") %>% select(Fish_ID,matphase,Date) 
+tabhistoBB <- left_join(tabhistoBB, stereo5, by = c("Fish_ID" = "Fish_ID"))
+
+GLCname<-c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","aoA","aoB")
+tabhistoBBlong<-gather(tabhistoBB,var,value,which(names(tabhistoBB)%in%c(GLCname)))
+
+tabhistoBBGCS <- data_summary(tabhistoBBlong, varname="value", groupnames=c("var","Date"))
+tabhistoBBGCS$Date <- factor(tabhistoBBGCS$Date, levels = c("11/2020","05/2021","06/2021","07/2021","09/2021","10/2021","11/2021","02/2022"))
+
+```
+
+plot 36 : Mean Germline cell (%) of individuals per month
+
+```{r plot36}
+
+tabhistoBBGCS %>% mutate(var = fct_relevel(var,"og","po1","po2","ldo","cao","vtg","oih","ho","POF","aoA","aoB","L")) %>%
+  ggplot(aes(x=Date, y=value, group=var, fill=var))+
+  theme_bw()+
+  labs(x = "", y = "Mean Germline cell %") +
+  theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust = 1, size = 11), 
+        axis.text.y = element_text(size = 11),
+        axis.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=11),
+        legend.title=element_text(size=12))+
+  geom_bar(stat="identity")+
+  scale_fill_manual(name = "Germline cells",values=c("lightgoldenrod1","yellow","orange","brown","gray0","lightpink1","deeppink2","darkslategray1","cyan3","gray52","gray88"))
+
+#graph2ppt(file="ggplot_plot.pptx", width=7, height=5)
+
+```
+
+## Maturity ogive, L50 and A50 : English channel
+
+```{r data41, message=FALSE, warning=FALSE}
+
+dat_ogiveEC <- tabmacro %>% filter(stock == "English channel")
+dat_ogiveEC$L_fish<-as.numeric(as.character(dat_ogiveEC$L_fish))
+
+dat_ogiveEC <-dat_ogiveEC[!grepl("F", dat_ogiveEC$mat_estim),]
+
+```
+
+plot 37 : Maturity ogive and L50 determined with visually estimated maturity
+
+```{r plot37}
+
+gonad_mat5<-gonad_mature(dat_ogiveEC,varNames=c("L_fish","mat_estim"),inmName=c("A"),
+			matName=c("B"),method="fq",niter=800)
+print(gonad_mat5)
+plot(gonad_mat5)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 38 : Maturity ogive and A50 determined with visually estimated maturity
+
+```{r plot38}
+
+gonad_mat6<-gonad_mature(dat_ogiveEC,varNames=c("age","mat_estim"),inmName=c("A"),
+			matName=c("B"),method="fq",niter=800)
+print(gonad_mat6)
+plot(gonad_mat6)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 39 : Maturity ogive and L50 determined with stereologically estimated maturity
+
+```{r plot39}
+
+gonad_mat7<-gonad_mature(dat_ogiveEC,varNames=c("L_fish","matphase"),inmName=c("A"),
+			matName=c("B","Ca","Cb"),method="fq",niter=800)
+print(gonad_mat7)
+plot(gonad_mat7)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 40 : Maturity ogive and A50 determined with stereologically estimated maturity
+
+```{r plot40}
+
+gonad_mat8<-gonad_mature(dat_ogiveEC,varNames=c("age","matphase"),inmName=c("A"),
+			matName=c("B","Ca","Cb"),method="fq",niter=800)
+print(gonad_mat8)
+plot(gonad_mat8)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+```{r data42, message=FALSE, warning=FALSE}
+
+tabhistoEC <- tabmacro %>% filter(stock == "English channel") %>% select(Fish_ID,matphase,Date) 
+tabhistoEC <- left_join(tabhistoEC, stereo5, by = c("Fish_ID" = "Fish_ID"))
+
+GLCname<-c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","aoA","aoB")
+tabhistoEClong<-gather(tabhistoEC,var,value,which(names(tabhistoEC)%in%c(GLCname)))
+
+tabhistoECGCS <- data_summary(tabhistoEClong, varname="value", groupnames=c("var","Date"))
+tabhistoECGCS$Date <- factor(tabhistoECGCS$Date, levels = c("11/2020","02/2021","03/2021","04/2021","05/2021","08/2021","09/2021","10/2021","11/2021","12/2021","01/2022","02/2022","08/2022"))
+
+```
+
+plot 41 : Mean Germline cell (%) of individuals per month
+
+```{r plot41}
+
+tabhistoECGCS %>% mutate(var = fct_relevel(var,"og","po1","po2","ldo","cao","vtg","oih","ho","POF","aoA","aoB","L")) %>%
+  ggplot(aes(x=Date, y=value, group=var, fill=var))+
+  theme_bw()+
+  labs(x = "", y = "Mean Germline cell %") +
+  theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust = 1, size = 11), 
+        axis.text.y = element_text(size = 11),
+        axis.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=11),
+        legend.title=element_text(size=12))+
+  geom_bar(stat="identity")+
+  scale_fill_manual(name = "Germline cells",values=c("lightgoldenrod1","yellow","orange","brown","gray0","lightpink1","deeppink2","darkslategray1","cyan3","gray52","gray88"))
+
+#graph2ppt(file="ggplot_plot.pptx", width=7, height=5)
+
+```
+
+# IV. Hierarchical clustering : Unsupervised learning
+
+Due to the natural oogenesis cycle of the species, we suspect that individuals in D were classified under A. We want to search for a signal, amongst the cellular structures quantified, that could help finding the individuals classified under the wrong maturity phase.
+We consider all individuals classified under A during the spawning period (classified under reading : L50) to truly be immatures (A). 
+ 
+Here we use only data from individuals classified under A (through stereology), but from all sampling periods and we select only germline cells.
+
+```{r data43}
+
+tabhisto <- tabmacro %>% select(Fish_ID,matphase,Date,stock)
+tabhisto <- left_join(tabhisto, stereo5, by = c("Fish_ID" = "Fish_ID"))
+tabmacro_A <- tabhisto %>% filter(grepl('A', matphase))
+
+tabmacro_A_BB <- tabmacro_A %>% filter(stock=="Bay of Biscay")
+tabmacro_A_EC <- tabmacro_A %>% filter(stock=="English channel")
+
+```
+
+We'll be using the Agglomerative approach (each observation is a distinct cluster, clusters are merges together until a stopping criterion is satisfied), with an euclidean (default) distance (continuous numerical values).
+
+We select only germline cells.
+
+## Bay of Biscay
+
+```{r data44, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+clustAD_BB<-tabmacro_A_BB%>%select(-matphase,-Date)%>%na.omit()%>%ungroup()
+
+```
+
+We cut the tree in 2 because we're looking for 2 potential groups (A and D)
+
+```{r nonsup1, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+htree<-hclust(dist(clustAD_BB),method="ward.D2")
+plot(htree, cex.lab = 1.8, cex.axis = 1.5,cex = 0.5)
+rect.hclust(htree,2)
+
+```
+
+Confusion matrix
+
+```{r nonsup2, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+newgp<-cutree(htree,2)
+table(newgp)
+
+```
+
+Plot 42 : Summary of Germline cells classified into 2 groups
+
+```{r plot42, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+clustAD_BBlong<-clustAD_BB%>%mutate(newgp=newgp)%>%
+  pivot_longer(og:aoB)
+
+ggplot(clustAD_BBlong,aes(x=as.factor(newgp),y=value))+geom_jitter(width = 0.1, height = 0.1)+
+  facet_wrap(~name,scale="free")
+
+```
+
+ACP
+
+```{r data45, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+clustAD_BB <- clustAD_BB%>%mutate(newgp=newgp)
+
+# Rename the groups
+clustAD_BB <- clustAD_BB  %>% mutate(newgp = str_replace(newgp, "2", "A"))
+clustAD_BB <- clustAD_BB  %>% mutate(newgp = str_replace(newgp, "1", "pfB"))
+
+```
+
+```{r acp7, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+dudi1  <-  dudi.pca(clustAD_BB%>%select(-newgp,-Fish_ID,-stock),  scale  =  T, center  =T, scan  =  FALSE,  nf  =  6)
+fviz_eig(dudi1)
+
+```
+
+```{r acp8, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+fviz_pca_biplot(dudi1, col.ind = as.factor(clustAD_BB$newgp), palette = c(), 
+                addEllipses = TRUE, label = "var", legend.title = "Maturity phase",
+                col.var = "blue",arrowsize = 1, repel = TRUE, labelsize=6)+
+  theme_bw()+
+  ggtitle("")+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13, face  = 'bold'),
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 11),
+    legend.position = c(0.8, 0.85),
+    legend.background = element_rect(size=0.5, linetype="solid", colour ="black"))
+
+#graph2ppt(file="ggplot_plot.pptx", width=8, height=5)
+
+```
+
+### Rectified maturity phase
+
+```{r data46, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+AD_BB <- clustAD_BB %>% select('Fish_ID','newgp')
+Tab_fin_BB <- left_join(tabmacro, AD_BB ,by = c("Fish_ID" = "Fish_ID")) %>% filter(stock=="Bay of Biscay")
+Tab_fin_BB <- Tab_fin_BB %>% mutate(newgp = coalesce(newgp,matphase))
+
+Tab_fin_BB$newgp <- factor(Tab_fin_BB$newgp, levels = c("A","pfB","B","Ca","Cb","D","E"))
+Tab_fin_BB$Date <- factor(Tab_fin_BB$Date, levels = c("11/2020","02/2021","03/2021","04/2021","05/2021","06/2021","07/2021","08/2021","09/2021","10/2021","11/2021","12/2021","01/2022","02/2022","08/2022"))
+
+```
+
+Confusion matrix
+
+Table 2 : Table crossing the number of individuals classified Stereologically with those same individuals re-classified with the stereological method
+
+```{r table2}
+
+table(Tab_fin_BB$matphase,Tab_fin_BB$newgp) 
+
+```
+
+Maturity Ogive and L50
+
+```{r data47, message=FALSE, warning=FALSE}
+
+dat_ogive <- Tab_fin_BB
+dat_ogive$L_fish<-as.numeric(as.character(dat_ogive$L_fish))
+
+dat_ogive <-dat_ogive[!grepl("E", dat_ogive$matphase),]
+
+dat_ogivepfB <-dat_ogive[!grepl("pfB", dat_ogive$newgp),]
+dat_ogivepfB <-dat_ogivepfB[!grepl("E", dat_ogivepfB$newgp),]
+
+```
+
+plot 43 : Maturity ogive and L50 determined with reviewed stereologically estimated maturity WITH pfB
+
+```{r plot43}
+
+gonad_mat9<-gonad_mature(dat_ogive,varNames=c("L_fish","newgp"),inmName=c("A"),
+			matName=c("B",'pfB',"Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat9)
+plot(gonad_mat9)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 44 : Maturity ogive and L50 determined with reviewed stereologically estimated maturity WITHOUT pfB
+
+```{r plot44}
+
+gonad_mat10<-gonad_mature(dat_ogivepfB,varNames=c("L_fish","newgp"),inmName=c("A"),
+			matName=c("B","Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat10)
+plot(gonad_mat10)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 45 : Maturity ogive and A50 determined with reviewed stereologically estimated maturity WITH pfB
+
+```{r plot45}
+
+gonad_mat11<-gonad_mature(dat_ogive,varNames=c("age","newgp"),inmName=c("A"),
+			matName=c("B",'pfB',"Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat11)
+plot(gonad_mat11)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 46 : Maturity ogive and A50 determined with reviewed stereologically estimated maturity WITHOUT pfB
+
+```{r plot46}
+
+gonad_mat12<-gonad_mature(dat_ogivepfB,varNames=c("age","newgp"),inmName=c("A"),
+			matName=c("B","Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat12)
+plot(gonad_mat12)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+## English Channel
+
+```{r data47, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+clustAD_EC<-tabmacro_A_EC%>%select(-matphase,-Date)%>%na.omit()%>%ungroup()
+
+```
+
+We cut the tree in 2 because we're looking for 2 potential groups (A and D)
+
+```{r nonsup3, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+htree<-hclust(dist(clustAD_EC),method="ward.D2")
+plot(htree, cex.lab = 1.8, cex.axis = 1.5,cex = 0.5)
+rect.hclust(htree,3)
+
+```
+
+Confusion matrix
+
+```{r nonsup4, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+newgp<-cutree(htree,3)
+table(newgp)
+
+```
+
+Plot 47 : Summary of Germline cells classified into 2 groups
+
+```{r plot47, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+clustAD_EClong<-clustAD_EC%>%mutate(newgp=newgp)%>%
+  pivot_longer(og:aoB)
+
+ggplot(clustAD_EClong,aes(x=as.factor(newgp),y=value))+geom_jitter(width = 0.1, height = 0.1)+
+  facet_wrap(~name,scale="free")
+
+```
+
+ACP
+
+```{r data48, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+clustAD_EC <- clustAD_EC%>%mutate(newgp=newgp)
+
+# Rename the groups
+clustAD_EC <- clustAD_EC  %>% mutate(newgp = str_replace(newgp, "1", "A"))
+clustAD_EC <- clustAD_EC  %>% mutate(newgp = str_replace(newgp, "2", "pfB"))
+clustAD_EC <- clustAD_EC  %>% mutate(newgp = str_replace(newgp, "3", "A"))
+
+```
+
+```{r acp9, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+dudi1  <-  dudi.pca(clustAD_EC%>%select(-newgp,-Fish_ID,-stock),  scale  =  T, center  =T, scan  =  FALSE,  nf  =  6)
+fviz_eig(dudi1)
+
+```
+
+```{r acp10, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+fviz_pca_biplot(dudi1, col.ind = as.factor(clustAD_EC$newgp), palette = c(), 
+                addEllipses = TRUE, label = "var", legend.title = "Maturity phase",
+                col.var = "blue",arrowsize = 1, repel = TRUE, labelsize=6)+
+  theme_bw()+
+  ggtitle("")+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13, face  = 'bold'),
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 11),
+    legend.position = c(0.15, 0.85),
+    legend.background = element_rect(size=0.5, linetype="solid", colour ="black"))
+
+#graph2ppt(file="ggplot_plot.pptx", width=8, height=5)
+
+```
+
+### Rectified maturity phase
+
+```{r data49, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+AD_EC <- clustAD_EC %>% select('Fish_ID','newgp')
+Tab_fin_EC <- left_join(tabmacro, AD_EC ,by = c("Fish_ID" = "Fish_ID")) %>% filter(stock=="English channel")
+Tab_fin_EC <- Tab_fin_EC %>% mutate(newgp = coalesce(newgp,matphase))
+
+Tab_fin_EC$newgp <- factor(Tab_fin_EC$newgp, levels = c("A","pfB","B","Ca","Cb","D","E"))
+Tab_fin_EC$Date <- factor(Tab_fin_EC$Date, levels = c("11/2020","02/2021","03/2021","04/2021","05/2021","06/2021","07/2021","08/2021","09/2021","10/2021","11/2021","12/2021","01/2022","02/2022","08/2022"))
+
+```
+
+Confusion matrix
+
+Table 3 : Table crossing the number of individuals classified Stereologically with those same individuals re-classified with the stereological method
+
+```{r table3}
+
+table(Tab_fin_EC$matphase,Tab_fin_EC$newgp) 
+
+```
+
+Maturity Ogive and L50
+
+```{r data50, message=FALSE, warning=FALSE}
+
+dat_ogive <- Tab_fin_EC
+dat_ogive$L_fish<-as.numeric(as.character(dat_ogive$L_fish))
+
+dat_ogive <-dat_ogive[!grepl("E", dat_ogive$matphase),]
+
+dat_ogivepfB <-dat_ogive[!grepl("pfB", dat_ogive$newgp),]
+dat_ogivepfB <-dat_ogivepfB[!grepl("E", dat_ogivepfB$newgp),]
+
+```
+
+plot 48 : Maturity ogive and L50 determined with reviewed stereologically estimated maturity WITH pfB
+
+```{r plot48}
+
+gonad_mat13<-gonad_mature(dat_ogive,varNames=c("L_fish","newgp"),inmName=c("A"),
+			matName=c("B",'pfB',"Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat13)
+plot(gonad_mat13)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 44 : Maturity ogive and L50 determined with reviewed stereologically estimated maturity WITHOUT pfB
+
+```{r plot44}
+
+gonad_mat14<-gonad_mature(dat_ogivepfB,varNames=c("L_fish","newgp"),inmName=c("A"),
+			matName=c("B","Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat14)
+plot(gonad_mat14)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 49 : Maturity ogive and A50 determined with reviewed stereologically estimated maturity WITH pfB
+
+```{r plot49}
+
+gonad_mat15<-gonad_mature(dat_ogive,varNames=c("age","newgp"),inmName=c("A"),
+			matName=c("B",'pfB',"Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat15)
+plot(gonad_mat15)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 50 : Maturity ogive and A50 determined with reviewed stereologically estimated maturity WITHOUT pfB
+
+```{r plot50}
+
+gonad_mat16<-gonad_mature(dat_ogivepfB,varNames=c("age","newgp"),inmName=c("A"),
+			matName=c("B","Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat16)
+plot(gonad_mat16)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+## All data
+
+```{r data51, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+clustAD<-tabmacro_A%>%select(-matphase,-Date)%>%na.omit()%>%ungroup()
+
+```
+
+We cut the tree in 2 because we're looking for 2 potential groups (A and D)
+
+```{r nonsup5, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+htree<-hclust(dist(clustAD),method="ward.D2")
+plot(htree, cex.lab = 1.8, cex.axis = 1.5,cex = 0.5)
+rect.hclust(htree,3)
+
+```
+
+Confusion matrix
+
+```{r nonsup6, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+newgp<-cutree(htree,3)
+table(newgp)
+
+```
+
+Plot 51 : Summary of Germline cells classified into 2 groups
+
+```{r plot51, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+clustADlong<-clustAD%>%mutate(newgp=newgp)%>%
+  pivot_longer(og:aoB)
+
+ggplot(clustADlong,aes(x=as.factor(newgp),y=value))+geom_jitter(width = 0.1, height = 0.1)+
+  facet_wrap(~name,scale="free")
+
+```
+
+ACP
+
+```{r data52, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+clustAD <- clustAD%>%mutate(newgp=newgp)
+
+# Rename the groups
+clustAD <- clustAD  %>% mutate(newgp = str_replace(newgp, "1", "A"))
+clustAD <- clustAD  %>% mutate(newgp = str_replace(newgp, "2", "pfB"))
+clustAD <- clustAD  %>% mutate(newgp = str_replace(newgp, "3", "A"))
+
+```
+
+```{r acp11, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+dudi1  <-  dudi.pca(clustAD%>%select(-newgp,-Fish_ID,-stock),  scale  =  T, center  =T, scan  =  FALSE,  nf  =  6)
+fviz_eig(dudi1)
+
+```
+
+```{r acp12, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+fviz_pca_biplot(dudi1, col.ind = as.factor(clustAD$newgp), palette = c(), 
+                addEllipses = TRUE, label = "var", legend.title = "Maturity phase",
+                col.var = "blue",arrowsize = 1, repel = TRUE, labelsize=6)+
+  theme_bw()+
+  ggtitle("")+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13, face  = 'bold'),
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 11),
+    legend.position = c(0.15, 0.8),
+    legend.background = element_rect(size=0.5, linetype="solid", colour ="black"))
+
+#graph2ppt(file="ggplot_plot.pptx", width=8, height=5)
+
+```
+
+### Rectified maturity phase
+
+```{r data53, echo=TRUE, fig.height=9, fig.width=18, message=FALSE, warning=FALSE}
+
+AD <- clustAD %>% select('Fish_ID','newgp')
+Tab_fin <- left_join(tabmacro, AD, by = c("Fish_ID" = "Fish_ID"))
+Tab_fin <- Tab_fin %>% mutate(newgp = coalesce(newgp,matphase))
+
+Tab_fin$newgp <- factor(Tab_fin$newgp, levels = c("A","pfB","B","Ca","Cb","D","E"))
+Tab_fin$Date <- factor(Tab_fin$Date, levels = c("11/2020","02/2021","03/2021","04/2021","05/2021","06/2021","07/2021","08/2021","09/2021","10/2021","11/2021","12/2021","01/2022","02/2022","08/2022"))
+
+```
+
+Confusion matrix
+
+Table 4 : Table crossing the number of individuals classified Stereologically with those same individuals re-classified with the stereological method
+
+```{r table4}
+
+table(Tab_fin$matphase,Tab_fin$newgp) 
+
+```
+
+Maturity Ogive and L50
+
+```{r data54, message=FALSE, warning=FALSE}
+
+dat_ogive <- Tab_fin
+dat_ogive$L_fish<-as.numeric(as.character(dat_ogive$L_fish))
+
+dat_ogive <-dat_ogive[!grepl("E", dat_ogive$matphase),]
+
+dat_ogivepfB <-dat_ogive[!grepl("pfB", dat_ogive$newgp),]
+dat_ogivepfB <-dat_ogivepfB[!grepl("E", dat_ogivepfB$newgp),]
+
+```
+
+plot 52 : Maturity ogive and L50 determined with reviewed stereologically estimated maturity WITH pfB
+
+```{r plot52}
+
+gonad_mat17<-gonad_mature(dat_ogive,varNames=c("L_fish","newgp"),inmName=c("A"),
+			matName=c("B",'pfB',"Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat17)
+plot(gonad_mat17)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 53 : Maturity ogive and L50 determined with reviewed stereologically estimated maturity WITHOUT pfB
+
+```{r plot53}
+
+gonad_mat18<-gonad_mature(dat_ogivepfB,varNames=c("L_fish","newgp"),inmName=c("A"),
+			matName=c("B","Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat18)
+plot(gonad_mat18)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 54 : Maturity ogive and A50 determined with reviewed stereologically estimated maturity WITH pfB
+
+```{r plot54}
+
+gonad_mat19<-gonad_mature(dat_ogive,varNames=c("age","newgp"),inmName=c("A"),
+			matName=c("B",'pfB',"Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat19)
+plot(gonad_mat19)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 55 : Maturity ogive and A50 determined with reviewed stereologically estimated maturity WITHOUT pfB
+
+```{r plot55}
+
+gonad_mat20<-gonad_mature(dat_ogivepfB,varNames=c("age","newgp"),inmName=c("A"),
+			matName=c("B","Ca","Cb","D"),method="fq",niter=800)
+print(gonad_mat20)
+plot(gonad_mat20)
+
+#graph2ppt(file="ggplot_plot.pptx", width=6, height=5)
+
+```
+
+plot 56 : Maturity phase (%) of individuals of different age class
+
+```{r plot56}
+
+ggplot(Tab_fin,aes(x=Date,y=L_fish, color = newgp, groupe=stock))+
+  geom_point(aes(shape=stock),width = 0.2, height = 0.2, position='jitter', size = 2)+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust = 1, size = 11), 
+        axis.text.y = element_text(size = 11),
+        axis.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=11),
+        legend.title=element_text(size=12),
+        panel.grid.minor = element_blank())+
+   scale_color_manual(name = "Stereology", values=c('#FF0000FF','purple','orange', 'springgreen3', 'green4', '#0092FFFF', 'black'))+
+  scale_shape_manual(name = "Stock", values=c(24, 3))+
+  scale_y_continuous(breaks=c(0,5,10,15,20,25,30,35))+
+  ylab("Length (cm)")+xlab("")
+
+
+graph2ppt(file="ggplot_plot.pptx", width=9, height=4)
+
+```
+
+Plot 57: Boxplots of the 20 different cellular structures for all 5 maturity phases (determined through stereology)
+
+```{r plot57, message=FALSE, warning=FALSE}
+
+histoname<-c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","L","aoA","aoB","gw","ct","bv","Is","E","U")
+
+Tab_finlong<-gather(Tab_fin,var,value,which(names(Tab_fin)%in%c(histoname)))
+ggplot(Tab_finlong,aes(x=var,y=value,color = stock, groupe=stock))+
+  geom_boxplot(position=position_dodge(width=0.9))+
+  geom_point(alpha=.3,position=position_dodge(width=0.9))+
+  scale_color_manual(values = c("navy", "darkred"), name = "")+
+		facet_wrap(~newgp)+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust = 1, size = 11), 
+        axis.text.y = element_text(size = 11),
+        axis.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=11),
+        legend.title=element_text(size=12))+
+    aes(x = factor(var, level = c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","L","aoA","aoB","gw","ct","bv","Is","E","U")))+
+		xlab("Cellular structures")+ylab("Percentage count")+
+  scale_y_continuous(labels=function(x) paste0(x,"%"))
+
+#graph2ppt(file="ggplot_plot.pptx", width=18, height=10)
+
+```
+
+Plot 58: Boxplots of the 20 different cellular structures for all 5 maturity phases (determined through stereology) for individuals from the Bay of Biscay stock
+
+```{r plot58, message=FALSE, warning=FALSE}
+
+histoname<-c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","L","aoA","aoB","gw","ct","bv","Is","E","U")
+
+Tab_finlong<-gather(Tab_fin,var,value,which(names(Tab_fin)%in%c(histoname)))
+
+ggplot(Tab_finlong%>%filter(stock=="Bay of Biscay"),aes(x=var,y=value))+
+  geom_boxplot(position=position_dodge())+
+  geom_point(alpha=.3, color="navy")+
+		facet_wrap(~newgp)+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust = 1, size = 11), 
+        axis.text.y = element_text(size = 11),
+        axis.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=11),
+        legend.title=element_text(size=12))+
+    aes(x = factor(var, level = c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","L","aoA","aoB","gw","ct","bv","Is","E","U")))+
+		xlab("Cellular structures")+ylab("Percentage count")+
+  scale_y_continuous(labels=function(x) paste0(x,"%"))
+
+#graph2ppt(file="ggplot_plot.pptx", width=11, height=7)
+
+```
+
+Plot 59: Boxplots of the 20 different cellular structures for all 5 maturity phases (determined through stereology) for individuals from the Bay of Biscay stock
+
+```{r plot59, message=FALSE, warning=FALSE}
+
+histoname<-c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","L","aoA","aoB","gw","ct","bv","Is","E","U")
+
+Tab_finlong<-gather(Tab_fin,var,value,which(names(Tab_fin)%in%c(histoname)))
+
+ggplot(Tab_finlong%>%filter(stock=="English channel"),aes(x=var,y=value))+
+  geom_boxplot(position=position_dodge())+
+  geom_point(alpha=.3, color="darkred")+
+		facet_wrap(~newgp)+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust = 1, size = 11), 
+        axis.text.y = element_text(size = 11),
+        axis.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=11),
+        legend.title=element_text(size=12))+
+    aes(x = factor(var, level = c("og","po1","po2","ldo","cao","vtg","oih","ho","POF","L","aoA","aoB","gw","ct","bv","Is","E","U")))+
+		xlab("Cellular structures")+ylab("Percentage count")+
+  scale_y_continuous(labels=function(x) paste0(x,"%"))
+
+#graph2ppt(file="ggplot_plot.pptx", width=11, height=7)
+
+```
+
+### GSI
+
+```{r data55}
+
+Tab_finGSI <-Tab_fin[Tab_fin$GSI != 0, ]
+Tab_finHSI <-Tab_fin[Tab_fin$HSI != 0, ] %>% na.omit()
+
+```
+
+plot 60 : Barplot of GSI for different phases for both stocks
+
+```{r plot60}
+
+ggplot(Tab_finGSI, aes(x=newgp, y=GSI,color = stock, groupe=stock)) +
+  theme_bw()+
+  geom_boxplot(position=position_dodge(width=0.8)) +
+  geom_point(alpha = 0.2, size = 2, width = 0.1, height = 0,position=position_dodge(width=0.8)) +
+  stat_summary(fun = mean, shape = 13, size = 1, colour = "black",position=position_dodge(width=0.8))+
+  scale_color_manual(values = c("navy", "darkred"), name = "")+
+  xlab("Maturity phase")+ylab("GSI (%)")+
+  theme(axis.text.x = element_text(size = 11), 
+        axis.text.y = element_text(size = 11),
+        axis.title=element_text(size=12,face="bold"),
+        legend.text=element_text(size=11),
+        legend.title=element_text(size=12))
+
+graph2ppt(file="ggplot_plot.pptx", width=6, height=4)
+
+```
